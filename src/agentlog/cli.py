@@ -7,11 +7,11 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from agentlog import __version__, capture, hooks_install, ls, tail
+from agentlog import __version__, capture, cost, hooks_install, ls, tail
 
 SUBCOMMANDS = ("init", "uninstall", "tail", "ls", "cost", "view")
 
-_STUB_SUBCOMMANDS = frozenset({"cost", "view"})
+_STUB_SUBCOMMANDS = frozenset({"view"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -131,6 +131,54 @@ def build_parser() -> argparse.ArgumentParser:
                 help="force a full SQLite index rebuild before listing",
             )
             sp.set_defaults(func=_run_ls)
+        elif name == "cost":
+            sp = sub.add_parser("cost", help="show token and dollar cost for one run or all runs")
+            sp.add_argument(
+                "run_id",
+                nargs="?",
+                default=None,
+                help="run id to show cost for (mutually exclusive with --all)",
+            )
+            sp.add_argument(
+                "--all",
+                dest="all_",
+                action="store_true",
+                help="show cost rollup for all runs",
+            )
+            sp.add_argument(
+                "--source",
+                choices=["hooks", "sdk", "all"],
+                default="all",
+                help="filter by data source (only valid with --all; default: all)",
+            )
+            sp.add_argument(
+                "--since",
+                type=ls._parse_duration,
+                default=None,
+                metavar="DURATION",
+                help="only runs started within DURATION (only valid with --all; e.g. 30m, 24h, 7d)",
+            )
+            sp.add_argument(
+                "--pricing",
+                type=Path,
+                dest="pricing_path",
+                default=None,
+                metavar="PATH",
+                help="path to a JSON pricing-override file (merged onto built-in)",
+            )
+            sp.add_argument(
+                "--json",
+                dest="as_json",
+                action="store_true",
+                help="machine-readable JSON output",
+            )
+            sp.add_argument(
+                "--no-cache-cost",
+                dest="no_cache_cost",
+                action="store_true",
+                help="exclude cache_creation cost (NOT cache_read) from the total; useful for debugging",
+            )
+            sp.set_defaults(func=_run_cost)
 
     # Routes `agentlog _hook <Event>` to capture.run_hook (the fail-open
     # boundary; never raises, always exits 0). Kept hidden from --help — this
@@ -164,6 +212,18 @@ def _run_ls(args: argparse.Namespace) -> int:
         limit=args.limit,
         as_json=args.as_json,
         reindex=args.reindex,
+    )
+
+
+def _run_cost(args: argparse.Namespace) -> int:
+    return cost.run_cost(
+        run_id=args.run_id,
+        all_=args.all_,
+        source=args.source,
+        since=args.since,
+        pricing_path=args.pricing_path,
+        as_json=args.as_json,
+        no_cache_cost=args.no_cache_cost,
     )
 
 

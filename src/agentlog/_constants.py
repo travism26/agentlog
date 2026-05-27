@@ -37,5 +37,6 @@ DEFAULT_DATA_ROOT_NAME: str = ".agentlog"
 SELF_LOG_NAME: str = "_self.log"
 RUNS_DIR_NAME: str = "runs"
 INDEX_FILE_NAME: str = "index.sqlite3"
+PRICING_FILE_NAME: str = "pricing.json"
 INDEX_SCHEMA_VERSION: int = 1
 UNKNOWN_SESSION_PREFIX: str = "unknown_session"

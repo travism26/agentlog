@@ -22,7 +22,7 @@ def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
     assert __version__ in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("cmd", [c for c in SUBCOMMANDS if c not in {"init", "uninstall", "tail", "ls"}])
+@pytest.mark.parametrize("cmd", [c for c in SUBCOMMANDS if c not in {"init", "uninstall", "tail", "ls", "cost"}])
 def test_subcommands_registered_but_not_implemented(
     cmd: str, capsys: pytest.CaptureFixture[str]
 ) -> None:

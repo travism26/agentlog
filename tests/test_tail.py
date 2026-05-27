@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -677,3 +678,84 @@ def test_is_already_ingested_true_after_ingest(
 
 def _make_iter(records: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     yield from records
+
+
+# ---------------------------------------------------------------------------
+# Regression: timestamps are derived from session window, NOT ingestion-now
+# (per Lesson #1 — sort-key direction. The timeline must be monotonic AND
+# anchored to the real session, not the wall-clock at tail time.)
+# ---------------------------------------------------------------------------
+
+
+def test_tail_timestamps_anchored_to_session_window_not_now(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """state.ended_at should come from file mtime (when session actually
+    ended), not from datetime.now() at tail invocation time. state.started_at
+    should be back-derived from end - duration_ms (1234 ms in the fixture).
+    Every event timestamp must lie within [started_at, ended_at]."""
+    monkeypatch.setenv("AGENTLOG_HOME", str(tmp_path))
+    # Move the fixture into a known-mtime location.
+    target = tmp_path / "fixture.jsonl"
+    target.write_text(_SDK_MINIMAL.read_text())
+    # Set mtime to a specific moment far in the past.
+    import os as _os
+    fixed_end = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    _os.utime(target, (fixed_end.timestamp(), fixed_end.timestamp()))
+
+    rc = tail.run_tail(target, run_id=None, source_name=None, dry_run=False, force=False)
+    assert rc == 0
+
+    run_dir = tmp_path / "runs" / "sdk-abc-123"
+    state = json.loads((run_dir / "state.json").read_text())
+
+    # End should be the fixture's mtime, not 'now'.
+    ended = datetime.fromisoformat(state["ended_at"])
+    assert ended == fixed_end, f"expected ended_at={fixed_end}, got {ended}"
+
+    # Start should be back-derived from duration_ms=1234.
+    started = datetime.fromisoformat(state["started_at"])
+    expected_start = fixed_end - timedelta(milliseconds=1234)
+    assert started == expected_start, f"expected started_at={expected_start}, got {started}"
+
+    # All event timestamps must fall within [started, ended] and be monotonic.
+    events = [
+        json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines() if line.strip()
+    ]
+    prev_ts = started - timedelta(seconds=1)
+    for ev in events:
+        ts = datetime.fromisoformat(ev["timestamp"])
+        assert started <= ts <= ended, f"event ts {ts} outside window [{started}, {ended}]"
+        assert ts >= prev_ts, "events out of monotonic order"
+        prev_ts = ts
+
+
+def test_tail_timestamps_monotonic_without_result_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the stream is truncated (no result record), we don't have an
+    authoritative duration_ms. Fall back to a synthetic 1-second-per-event
+    window so timestamps are still distinguishable and monotonic — NOT all
+    stamped with the same value."""
+    monkeypatch.setenv("AGENTLOG_HOME", str(tmp_path))
+    truncated = tmp_path / "truncated.jsonl"
+    # init + 3 tool_use events; no result record
+    truncated.write_text(
+        '{"type":"system","subtype":"init","session_id":"trunc-1","cwd":"/tmp","model":"claude-opus-4-7"}\n'
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/a"}}]},"session_id":"trunc-1"}\n'
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/b"}}]},"session_id":"trunc-1"}\n'
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t3","name":"Read","input":{"file_path":"/c"}}]},"session_id":"trunc-1"}\n'
+    )
+    rc = tail.run_tail(truncated, run_id=None, source_name=None, dry_run=False, force=False)
+    assert rc == 0
+
+    run_dir = tmp_path / "runs" / "sdk-trunc-1"
+    events = [
+        json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines() if line.strip()
+    ]
+    timestamps = [datetime.fromisoformat(e["timestamp"]) for e in events]
+    # All distinct (not the same wall-clock moment).
+    assert len(set(timestamps)) == len(timestamps), "timestamps collapsed to single value"
+    # Strictly monotonic.
+    for a, b in zip(timestamps, timestamps[1:], strict=False):
+        assert a < b, f"non-monotonic: {a} >= {b}"

@@ -29,7 +29,7 @@ import json
 import os
 import sys
 from collections.abc import Callable, Iterable, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -337,10 +337,11 @@ def _process_one(
 
     now = datetime.now(UTC)
 
+    # File mtime ≈ session END (Claude Code appends as events stream in).
     try:
-        started_at = _isoformat(datetime.fromtimestamp(path.stat().st_mtime, tz=UTC))
+        end_dt = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
     except OSError:
-        started_at = _isoformat(now)
+        end_dt = now
 
     state: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -348,8 +349,9 @@ def _process_one(
         "source": SOURCE_SDK,
         "source_file": str(path),
         "source_name": source_name or path.name,
-        "started_at": started_at,
-        "ended_at": None,
+        # Provisional; both timestamps recomputed once we know duration_ms.
+        "started_at": _isoformat(end_dt),
+        "ended_at": _isoformat(end_dt),
         "cwd": None,
         "model": None,
         "event_count": 0,
@@ -364,7 +366,12 @@ def _process_one(
         "cache_read_tokens": 0,
         "cache_creation_tokens": 0,
     }
-    event_count = 0
+    # Buffer all events in-memory so we can assign correct timestamps after the
+    # session duration is known. v0.1 cc_raw_output.jsonl files are KB-to-MB
+    # range; loading into memory is fine. If we ever ingest GB-scale streams
+    # we'll want a two-pass file read instead.
+    buffered: list[dict[str, Any]] = []
+    duration_ms: int | None = None
     dry_counts: dict[str, int] = {}
 
     try:
@@ -383,45 +390,57 @@ def _process_one(
                     record: dict[str, Any] = obj
                 except json.JSONDecodeError:
                     state["truncated"] = True
-                    err_event: dict[str, Any] = {
+                    buffered.append({
                         "schema_version": SCHEMA_VERSION,
                         "event": "unknown",
-                        "timestamp": _isoformat(now),
                         "session_id": derived_id,
                         "source": SOURCE_SDK,
                         "sdk_source_file": str(path),
                         "original_type": "parse_error",
                         "raw": f"unparseable line {lineno}",
-                    }
-                    event_count += 1
-                    if dry_run:
-                        dry_counts["unknown"] = dry_counts.get("unknown", 0) + 1
-                    else:
-                        _append_event(run_dir, err_event)
+                    })
                     continue
 
+                # Capture the result record's duration_ms — it's the authoritative
+                # session length, used to back-derive started_at from end mtime.
+                if record.get("type") == "result":
+                    raw_dur = record.get("duration_ms")
+                    if isinstance(raw_dur, (int, float)) and raw_dur > 0:
+                        duration_ms = int(raw_dur)
+
                 for event in _translate([record], run_id=derived_id, abs_path=str(path), now=now):
-                    event_count += 1
+                    buffered.append(event)
                     ev_kind = str(event.get("event", "unknown"))
-                    if dry_run:
-                        dry_counts[ev_kind] = dry_counts.get(ev_kind, 0) + 1
-                    else:
-                        _append_event(run_dir, event)
-                        if ev_kind == "session_start":
-                            state["cwd"] = event.get("cwd")
-                            state["model"] = event.get("model")
-                        elif ev_kind == "stop":
-                            usage = event.get("usage") or {}
-                            for key in cost_totals:
-                                cost_totals[key] += int(usage.get(key) or 0)
-                            if event.get("is_error"):
-                                state["session_failed"] = True
+                    if ev_kind == "session_start":
+                        state["cwd"] = event.get("cwd")
+                        state["model"] = event.get("model")
+                    elif ev_kind == "stop":
+                        usage = event.get("usage") or {}
+                        for key in cost_totals:
+                            cost_totals[key] += int(usage.get(key) or 0)
+                        if event.get("is_error"):
+                            state["session_failed"] = True
 
     except OSError as exc:
         print(f"agentlog tail: error reading {path}: {exc}", file=sys.stderr)
         return 1
 
+    event_count = len(buffered)
+
+    # Back-derive start time from end mtime + authoritative duration_ms. If the
+    # stream is missing a result record (truncated session, etc.), fall back to
+    # 1 second before end so timestamps are still monotonic and distinguishable.
+    fallback_seconds = max(1, event_count)
+    start_dt = end_dt - timedelta(
+        milliseconds=duration_ms if duration_ms is not None else fallback_seconds * 1000
+    )
+    state["started_at"] = _isoformat(start_dt)
+    state["ended_at"] = _isoformat(end_dt)
+
     if dry_run:
+        for ev in buffered:
+            kind = str(ev.get("event", "unknown"))
+            dry_counts[kind] = dry_counts.get(kind, 0) + 1
         total = sum(dry_counts.values())
         if dry_counts:
             parts = ", ".join(f"{k}:{v}" for k, v in sorted(dry_counts.items()))
@@ -430,8 +449,19 @@ def _process_one(
             print(f"would write: {derived_id} (0 events)")
         return 0
 
+    # Linear interpolation across [start_dt, end_dt] so the timeline is
+    # monotonic, visually distinguishable, and anchored to the real session
+    # window. Per-record timestamps don't exist in stream-json output, so this
+    # is the best we can do without lying — at least the order is preserved
+    # and the boundaries are correct.
+    span_seconds = max(0.0, (end_dt - start_dt).total_seconds())
+    denom = max(1, event_count - 1)
+    for idx, event in enumerate(buffered):
+        ts = start_dt + timedelta(seconds=span_seconds * idx / denom)
+        event["timestamp"] = _isoformat(ts)
+        _append_event(run_dir, event)
+
     state["event_count"] = event_count
-    state["ended_at"] = _isoformat(datetime.now(UTC))
 
     # Ensure events.jsonl exists for idempotency detection (even if empty).
     run_dir.mkdir(parents=True, exist_ok=True)

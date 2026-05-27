@@ -7,11 +7,11 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from agentlog import __version__, capture, cost, hooks_install, ls, tail
+from agentlog import __version__, capture, cost, hooks_install, ls, tail, view
 
 SUBCOMMANDS = ("init", "uninstall", "tail", "ls", "cost", "view")
 
-_STUB_SUBCOMMANDS = frozenset({"view"})
+_STUB_SUBCOMMANDS: frozenset[str] = frozenset()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -179,6 +179,40 @@ def build_parser() -> argparse.ArgumentParser:
                 help="exclude cache_creation cost (NOT cache_read) from the total; useful for debugging",
             )
             sp.set_defaults(func=_run_cost)
+        elif name == "view":
+            sp = sub.add_parser(
+                "view", help="render a single captured run as a three-panel TUI"
+            )
+            sp.add_argument(
+                "run_id",
+                help="run id to inspect (from agentlog ls)",
+            )
+            sp.add_argument(
+                "--limit",
+                type=int,
+                default=100,
+                metavar="N",
+                help="max timeline events to show; 0 = unlimited (default: 100)",
+            )
+            sp.add_argument(
+                "--events-only",
+                dest="events_only",
+                action="store_true",
+                help="render only the timeline section (skip header panel and cost footer)",
+            )
+            sp.add_argument(
+                "--no-truncate",
+                dest="no_truncate",
+                action="store_true",
+                help="disable 80/60-char per-row display cap",
+            )
+            sp.add_argument(
+                "--json",
+                dest="as_json",
+                action="store_true",
+                help="emit combined JSON object; works without rich installed",
+            )
+            sp.set_defaults(func=_run_view)
 
     # Routes `agentlog _hook <Event>` to capture.run_hook (the fail-open
     # boundary; never raises, always exits 0). Kept hidden from --help — this
@@ -224,6 +258,16 @@ def _run_cost(args: argparse.Namespace) -> int:
         pricing_path=args.pricing_path,
         as_json=args.as_json,
         no_cache_cost=args.no_cache_cost,
+    )
+
+
+def _run_view(args: argparse.Namespace) -> int:
+    return view.run_view(
+        run_id=args.run_id,
+        limit=args.limit,
+        events_only=args.events_only,
+        no_truncate=args.no_truncate,
+        as_json=args.as_json,
     )
 
 

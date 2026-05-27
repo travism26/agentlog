@@ -7,11 +7,11 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from agentlog import __version__, capture, hooks_install, tail
+from agentlog import __version__, capture, hooks_install, ls, tail
 
 SUBCOMMANDS = ("init", "uninstall", "tail", "ls", "cost", "view")
 
-_STUB_SUBCOMMANDS = frozenset({"ls", "cost", "view"})
+_STUB_SUBCOMMANDS = frozenset({"cost", "view"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -85,6 +85,52 @@ def build_parser() -> argparse.ArgumentParser:
                 help="re-ingest even if events already exist",
             )
             sp.set_defaults(func=_run_tail)
+        elif name == "ls":
+            sp = sub.add_parser("ls", help="list captured runs across hooks and SDK sources")
+            sp.add_argument(
+                "--source",
+                choices=["hooks", "sdk", "all"],
+                default="all",
+                help="filter by data source (default: all)",
+            )
+            sp.add_argument(
+                "--since",
+                type=ls._parse_duration,
+                default=None,
+                metavar="DURATION",
+                help="only runs started within DURATION (e.g. 30m, 24h, 7d)",
+            )
+            sp.add_argument(
+                "--sort",
+                dest="sort_key",
+                choices=["started", "ended", "duration", "events", "tokens", "cost"],
+                default="started",
+                help="sort column (default: started); cost is an alias for tokens in v0.1",
+            )
+            sp.add_argument(
+                "--reverse",
+                action="store_true",
+                help="ascending order (default is descending / newest-first)",
+            )
+            sp.add_argument(
+                "--limit",
+                type=int,
+                default=50,
+                metavar="N",
+                help="max rows to show; 0 = unlimited (default: 50)",
+            )
+            sp.add_argument(
+                "--json",
+                dest="as_json",
+                action="store_true",
+                help="machine-readable JSON output",
+            )
+            sp.add_argument(
+                "--reindex",
+                action="store_true",
+                help="force a full SQLite index rebuild before listing",
+            )
+            sp.set_defaults(func=_run_ls)
 
     # Routes `agentlog _hook <Event>` to capture.run_hook (the fail-open
     # boundary; never raises, always exits 0). Kept hidden from --help — this
@@ -106,6 +152,18 @@ def _run_tail(args: argparse.Namespace) -> int:
         source_name=args.source_name,
         dry_run=args.dry_run,
         force=args.force,
+    )
+
+
+def _run_ls(args: argparse.Namespace) -> int:
+    return ls.run_ls(
+        source=args.source,
+        since=args.since,
+        sort_key=args.sort_key,
+        reverse=args.reverse,
+        limit=args.limit,
+        as_json=args.as_json,
+        reindex=args.reindex,
     )
 
 

@@ -1,6 +1,6 @@
 """Shared constants for agentlog hook installation and capture.
 
-Two notes pinned for future contributors:
+Three notes pinned for future contributors:
 
 1. ``HOOK_COMMAND_PREFIX`` is part of the *installed-file format*. Renaming it
    orphans every existing installation: ``uninstall`` will no longer recognise old
@@ -9,6 +9,10 @@ Two notes pinned for future contributors:
 2. ``SCHEMA_VERSION`` must be bumped (to 2, 3, …) whenever a breaking change is
    made to the JSONL wire format. Downstream readers (``ls``, ``cost``, ``view``)
    gate on this integer.
+3. ``INDEX_SCHEMA_VERSION`` is the version of the SQLite cache schema used by
+   ``ls``. It is independent of ``SCHEMA_VERSION`` (the JSONL wire-format version).
+   Bumping ``INDEX_SCHEMA_VERSION`` triggers a drop-and-rebuild of the ``runs``
+   table — see ``ls.py``.
 """
 
 from __future__ import annotations
@@ -32,4 +36,6 @@ MAX_INLINE_BYTES: int = 4096
 DEFAULT_DATA_ROOT_NAME: str = ".agentlog"
 SELF_LOG_NAME: str = "_self.log"
 RUNS_DIR_NAME: str = "runs"
+INDEX_FILE_NAME: str = "index.sqlite3"
+INDEX_SCHEMA_VERSION: int = 1
 UNKNOWN_SESSION_PREFIX: str = "unknown_session"

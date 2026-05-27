@@ -1,0 +1,89 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentlog"
+version = "0.1.0.dev0"
+description = "Local-first observability for AI coding agents — captures Claude Code sessions AND SDK runs into one replayable log."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Travis Martin" }]
+keywords = ["claude-code", "observability", "ai-agents", "logging", "telemetry"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Debuggers",
+]
+# Core deps: stdlib only. See DESIGN.md.
+dependencies = []
+
+[project.optional-dependencies]
+tui = ["rich>=13.7"]
+# `adw` extras pull in deps for the in-repo Agentic Developer Workflow (.adw/).
+# These are NOT runtime deps of the agentlog product — they are dev tooling
+# used to drive Claude Code through the SDLC pipeline. Keep agentlog core
+# stdlib-only per CLAUDE.md.
+adw = [
+    "pydantic>=2.5",
+    "python-dotenv>=1.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "rich>=13.7",
+    "pydantic>=2.5",
+    "python-dotenv>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/travism26/agentlog"
+Issues = "https://github.com/travism26/agentlog/issues"
+
+[project.scripts]
+agentlog = "agentlog.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentlog"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+]
+ignore = ["E501"] # line length handled by formatter
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]

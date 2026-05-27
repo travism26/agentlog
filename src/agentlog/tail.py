@@ -28,7 +28,7 @@ import hashlib
 import json
 import os
 import sys
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -158,6 +158,121 @@ def _derive_run_id(path: Path, explicit: str | None, root: Path) -> tuple[str, b
 # ---------------------------------------------------------------------------
 
 
+def _message_content(record: dict[str, Any]) -> list[Any]:
+    """Pull the `message.content` list out of an assistant/user record, robustly."""
+    msg = record.get("message")
+    if not isinstance(msg, dict):
+        return []
+    raw = msg.get("content")
+    return raw if isinstance(raw, list) else []
+
+
+def _text_event(base: dict[str, Any], event: str, raw_text: str) -> dict[str, Any]:
+    """Build a text-bearing event (assistant_text or prompt) with truncation."""
+    text_bytes = len(raw_text.encode("utf-8"))
+    clipped, truncated_bytes = _truncate(raw_text, MAX_INLINE_BYTES)
+    return {
+        **base,
+        "event": event,
+        "text": clipped,
+        "text_bytes": text_bytes,
+        "truncated_bytes": truncated_bytes,
+    }
+
+
+def _translate_system(record: dict[str, Any], base: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    if record.get("subtype") != "init":
+        yield from _translate_unknown(record, base)
+        return
+    yield {
+        **base,
+        "event": "session_start",
+        "cwd": record.get("cwd"),
+        "model": record.get("model"),
+        "parent_session_id": None,
+    }
+
+
+def _translate_assistant(
+    record: dict[str, Any], base: dict[str, Any]
+) -> Iterator[dict[str, Any]]:
+    for block in _message_content(record):
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            yield _text_event(base, "assistant_text", str(block.get("text") or ""))
+        elif block_type == "tool_use":
+            tool_name = str(block.get("name") or "unknown")
+            params_raw = json.dumps(block.get("input") or {}, separators=(",", ":"))
+            params_summary, _ = _truncate(params_raw, MAX_INLINE_BYTES)
+            yield {
+                **base,
+                "event": "tool_use",
+                "tool": tool_name,
+                "params_summary": params_summary,
+                "result_summary": None,
+                "duration_ms": None,
+                "truncated_bytes": 0,
+            }
+        # thinking blocks intentionally skipped in v0.1
+
+
+def _translate_user(record: dict[str, Any], base: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    # tool_result-only user records (no text blocks) are skipped — they're
+    # protocol echoes, not human input.
+    for block in _message_content(record):
+        if isinstance(block, dict) and block.get("type") == "text":
+            yield _text_event(base, "prompt", str(block.get("text") or ""))
+
+
+def _translate_result(
+    record: dict[str, Any], base: dict[str, Any]
+) -> Iterator[dict[str, Any]]:
+    usage_raw = record.get("usage") or {}
+    usage: dict[str, int] = {
+        "input_tokens": int(usage_raw.get("input_tokens") or 0),
+        "output_tokens": int(usage_raw.get("output_tokens") or 0),
+        "cache_read_tokens": int(usage_raw.get("cache_read_input_tokens") or 0),
+        "cache_creation_tokens": int(usage_raw.get("cache_creation_input_tokens") or 0),
+    }
+    yield {
+        **base,
+        "event": "stop",
+        "usage": usage,
+        "duration_ms": record.get("duration_ms"),
+        "total_cost_usd": record.get("total_cost_usd"),
+        "is_error": bool(record.get("is_error")),
+    }
+
+
+def _translate_unknown(
+    record: dict[str, Any], base: dict[str, Any]
+) -> Iterator[dict[str, Any]]:
+    raw_json = json.dumps(record, separators=(",", ":"))
+    raw: Any = record
+    if len(raw_json.encode("utf-8")) > MAX_INLINE_BYTES:
+        raw, _ = _truncate(raw_json, MAX_INLINE_BYTES)
+    yield {
+        **base,
+        "event": "unknown",
+        "original_type": record.get("type"),
+        "raw": raw,
+    }
+
+
+# Per-record-type dispatch. Mirrors capture._DISPATCH. Anything not in this
+# table falls through to _translate_unknown — graceful schema-drift handling.
+_RECORD_TRANSLATORS: dict[
+    str, Callable[[dict[str, Any], dict[str, Any]], Iterator[dict[str, Any]]]
+] = {
+    "system": _translate_system,
+    "assistant": _translate_assistant,
+    "user": _translate_user,
+    "result": _translate_result,
+}
+
+
 def _translate(
     records: Iterable[dict[str, Any]],
     *,
@@ -168,132 +283,18 @@ def _translate(
     """Yield event-dict records ready for _append_event.
 
     Pure: no I/O, no side effects. Caller injects now and abs_path for
-    deterministic tests. Per-record translation rules per spec table.
+    deterministic tests. Per-record dispatch via _RECORD_TRANSLATORS.
     """
-    ts = _isoformat(now)
     base: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "session_id": run_id,
         "source": SOURCE_SDK,
         "sdk_source_file": abs_path,
-        "timestamp": ts,
+        "timestamp": _isoformat(now),
     }
-
     for record in records:
-        rec_type = record.get("type")
-        rec_subtype = record.get("subtype", "")
-
-        if rec_type == "system" and rec_subtype == "init":
-            yield {
-                **base,
-                "event": "session_start",
-                "cwd": record.get("cwd"),
-                "model": record.get("model"),
-                "parent_session_id": None,
-            }
-
-        elif rec_type == "assistant":
-            msg = record.get("message")
-            content: list[Any] = []
-            if isinstance(msg, dict):
-                raw_content = msg.get("content")
-                if isinstance(raw_content, list):
-                    content = raw_content
-
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                block_type = block.get("type")
-
-                if block_type == "text":
-                    raw_text = str(block.get("text") or "")
-                    text_bytes = len(raw_text.encode("utf-8"))
-                    clipped, truncated_bytes = _truncate(raw_text, MAX_INLINE_BYTES)
-                    yield {
-                        **base,
-                        "event": "assistant_text",
-                        "text": clipped,
-                        "text_bytes": text_bytes,
-                        "truncated_bytes": truncated_bytes,
-                    }
-
-                elif block_type == "tool_use":
-                    tool_name = str(block.get("name") or "unknown")
-                    params_raw = json.dumps(block.get("input") or {}, separators=(",", ":"))
-                    params_summary, _ = _truncate(params_raw, MAX_INLINE_BYTES)
-                    yield {
-                        **base,
-                        "event": "tool_use",
-                        "tool": tool_name,
-                        "params_summary": params_summary,
-                        "result_summary": None,
-                        "duration_ms": None,
-                        "truncated_bytes": 0,
-                    }
-
-                # thinking blocks skipped in v0.1
-
-        elif rec_type == "user":
-            msg = record.get("message")
-            content = []
-            if isinstance(msg, dict):
-                raw_content = msg.get("content")
-                if isinstance(raw_content, list):
-                    content = raw_content
-
-            has_text = any(
-                isinstance(b, dict) and b.get("type") == "text" for b in content
-            )
-
-            if has_text:
-                for block in content:
-                    if not isinstance(block, dict) or block.get("type") != "text":
-                        continue
-                    raw_text = str(block.get("text") or "")
-                    text_bytes = len(raw_text.encode("utf-8"))
-                    clipped, truncated_bytes = _truncate(raw_text, MAX_INLINE_BYTES)
-                    yield {
-                        **base,
-                        "event": "prompt",
-                        "text": clipped,
-                        "text_bytes": text_bytes,
-                        "truncated_bytes": truncated_bytes,
-                    }
-            # tool_result-only records: skipped in v0.1
-
-        elif rec_type == "result":
-            usage_raw = record.get("usage") or {}
-            usage: dict[str, int] = {
-                "input_tokens": int(usage_raw.get("input_tokens") or 0),
-                "output_tokens": int(usage_raw.get("output_tokens") or 0),
-                "cache_read_tokens": int(usage_raw.get("cache_read_input_tokens") or 0),
-                "cache_creation_tokens": int(
-                    usage_raw.get("cache_creation_input_tokens") or 0
-                ),
-            }
-            yield {
-                **base,
-                "event": "stop",
-                "usage": usage,
-                "duration_ms": record.get("duration_ms"),
-                "total_cost_usd": record.get("total_cost_usd"),
-                "is_error": bool(record.get("is_error")),
-            }
-
-        else:
-            raw_json = json.dumps(record, separators=(",", ":"))
-            raw: Any
-            if len(raw_json.encode("utf-8")) <= MAX_INLINE_BYTES:
-                raw = record
-            else:
-                clipped_raw, _ = _truncate(raw_json, MAX_INLINE_BYTES)
-                raw = clipped_raw
-            yield {
-                **base,
-                "event": "unknown",
-                "original_type": rec_type,
-                "raw": raw,
-            }
+        translator = _RECORD_TRANSLATORS.get(str(record.get("type") or ""), _translate_unknown)
+        yield from translator(record, base)
 
 
 # ---------------------------------------------------------------------------

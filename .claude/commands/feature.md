@@ -26,6 +26,12 @@ prompt: $2
 - Reference the research document in the Relevant Files section
 
 - Research the codebase starting with `README.md`, `DESIGN.md`, and `CLAUDE.md`
+- **Read `docs/adw-lessons.md` BEFORE drafting the plan.** It catalogs recurring
+  bug patterns from prior ADW runs and includes copy-paste-ready "Test shape"
+  blocks for each. If your feature touches any of these patterns (sort keys,
+  schema versioning, fail-open boundaries, sentinel strings, dispatch tables,
+  etc.), copy the relevant Test shape into your plan's Testing Strategy section
+  verbatim — don't rediscover them at review time.
 - Replace every <placeholder> in the `Plan Format` with the requested value
 - Use your reasoning model: THINK HARD about the feature requirements, design, and implementation approach
 - Follow existing patterns and conventions in the codebase
@@ -38,6 +44,7 @@ prompt: $2
 - `README.md` - Project overview (start here)
 - `DESIGN.md` - Locked v0.1 design document — the source of truth for scope, architecture, and hard rules
 - `CLAUDE.md` - Project orientation and non-negotiable constraints
+- `docs/adw-lessons.md` - Recurring bug patterns from prior ADW runs (sort keys, schema bootstrap, fail-open boundaries, etc.) — apply BEFORE writing the spec
 - `ai_docs/research/` - Research documents from pre-planning analysis (check for `{adw_id}-*.md`)
 - `src/agentlog/` - Main package source code
   - `cli.py` - CLI entry point (subcommands: init, uninstall, tail, ls, cost, view)

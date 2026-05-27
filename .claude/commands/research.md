@@ -26,6 +26,10 @@ prompt: $2
 
 - Read `DESIGN.md` (locked v0.1 design — source of truth for scope and architecture)
 - Read `CLAUDE.md` (project orientation and non-negotiable hard rules)
+- **Read `docs/adw-lessons.md`** — recurring bug patterns from prior ADW runs.
+  Note which lessons apply to the prompt's domain and flag them in the research
+  output's Recommendations section so the plan phase pre-commits to the
+  appropriate test shapes.
 - Search for README files across the codebase
 - Look in `research/` for prior research notes that may be relevant
 - Check `.claude/` for configuration and command patterns

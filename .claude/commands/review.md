@@ -20,6 +20,37 @@ agent_name: $ARGUMENT if provided, otherwise use 'review_agent'
   - Test coverage for new functionality
   - CLI/module behavior matches spec expectations
   - Proper Python patterns and conventions
+- **IMPORTANT: read `docs/adw-lessons.md` BEFORE reviewing.** It captures recurring
+  bug patterns surfaced during prior ADW runs. For each numbered lesson, scan the
+  diff and flag any matching issue. Cite the lesson number in your `issue_description`
+  (e.g., "Lesson #1: sort key without direction-asserting test"). High-leverage
+  checks specifically — do not skip these:
+  - **Lesson #1 — sort keys:** does any function in the diff produce ordered output?
+    If yes, verify there's a test that asserts the position of one row relative
+    to another in the dimension being sorted. Missing test → flag as `skippable`.
+  - **Lesson #2 — module-level asserts:** grep the diff for `^assert ` at indent 0
+    (module scope). Any hit is a fail-open violation → flag as `tech_debt`.
+  - **Lesson #3 — SQLite schema bootstrap order:** if the diff adds or modifies
+    SQLite schema management, verify the version-check runs BEFORE any incompatible
+    table is touched. Misordering → flag as `tech_debt`.
+  - **Lesson #4 — stale future comments:** grep the diff for comments containing
+    `future|will replace|TODO|FIXME|will land in|deferred to` and verify each is
+    still accurate after the diff. Stale → flag as `skippable`.
+  - **Lesson #5 — durable installed-format strings:** if a constant is being
+    renamed and that constant appears in any file outside `src/agentlog/` (settings.json,
+    JSONL records, sqlite columns), flag as `blocker` and demand a migration plan.
+  - **Lesson #7 — fail-open boundary integrity:** if the diff modifies code under
+    a `try/except Exception` fail-open boundary, verify the recovery path itself
+    cannot raise (e.g., `_log_self` calls wrapped in `contextlib.suppress`).
+  - **Lesson #8 — stylistic vs spec conflicts:** if you're about to flag use of
+    `collections.abc.Callable`, `contextlib.suppress`, or any stdlib idiom that
+    `ruff` actively prefers (UP035, SIM105, etc.), DON'T. Those are not bugs.
+  - **Lesson #11 — regression test naming:** for any reviewer-found bug, the
+    fix MUST add a named regression test describing the contract being asserted.
+    Missing test → re-flag the original bug as `blocker` since "fixed" without a
+    test means "fixed silently" which means "next refactor re-breaks it."
+  Lessons #6, #9, #10 are also worth scanning, but the seven above are the
+  highest-leverage / most-frequently-violated.
 - IMPORTANT: Issue Severity Guidelines
   - Think hard about the impact of the issue on the feature and the user
   - Guidelines:

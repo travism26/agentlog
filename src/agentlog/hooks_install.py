@@ -30,16 +30,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# PreToolUse intentionally omitted — deferred past v0.1 (CLAUDE.md rule #5).
-EVENTS: tuple[str, ...] = (
-    "SessionStart",
-    "UserPromptSubmit",
-    "PostToolUse",
-    "Stop",
-    "SessionEnd",
-)
-
-HOOK_COMMAND_PREFIX = "agentlog _hook"
+from agentlog._constants import EVENTS as EVENTS  # noqa: F401
+from agentlog._constants import HOOK_COMMAND_PREFIX as HOOK_COMMAND_PREFIX  # noqa: F401
 
 
 def agentlog_command(event: str) -> str:

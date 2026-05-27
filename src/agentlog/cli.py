@@ -6,7 +6,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from agentlog import __version__, hooks_install
+from agentlog import __version__, capture, hooks_install
 
 SUBCOMMANDS = ("init", "uninstall", "tail", "ls", "cost", "view")
 
@@ -54,16 +54,21 @@ def build_parser() -> argparse.ArgumentParser:
             )
             sp.set_defaults(func=_run_uninstall)
 
-    # Hidden no-op stub — ship-scope item #2 will replace with real handler logic.
-    # Ensures `agentlog _hook <Event>` exits 0 cleanly after `agentlog init`.
+    # Routes `agentlog _hook <Event>` to capture.run_hook (the fail-open
+    # boundary; never raises, always exits 0). Kept hidden from --help — this
+    # is the install-time wiring target for settings.json, not a user command.
     hook_sp = sub.add_parser("_hook", help=argparse.SUPPRESS)
     hook_sp.add_argument("event")
-    hook_sp.set_defaults(func=lambda args: 0)
+    hook_sp.set_defaults(func=_run_hook)
     # Python 3.11 doesn't honour help=SUPPRESS for subparsers in the listing;
     # remove the pseudo-action so _hook stays functional but absent from --help.
     sub._choices_actions = [a for a in sub._choices_actions if a.dest != "_hook"]
 
     return parser
+
+
+def _run_hook(args: argparse.Namespace) -> int:
+    return capture.run_hook(args.event)
 
 
 def _not_implemented(args: argparse.Namespace) -> int:

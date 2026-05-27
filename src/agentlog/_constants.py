@@ -27,6 +27,7 @@ HOOK_COMMAND_PREFIX: str = "agentlog _hook"
 
 SCHEMA_VERSION: int = 1
 SOURCE_HOOKS: str = "hooks"
+SOURCE_SDK: str = "sdk"
 MAX_INLINE_BYTES: int = 4096
 DEFAULT_DATA_ROOT_NAME: str = ".agentlog"
 SELF_LOG_NAME: str = "_self.log"

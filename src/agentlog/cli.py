@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
-from agentlog import __version__, capture, hooks_install
+from agentlog import __version__, capture, hooks_install, tail
 
 SUBCOMMANDS = ("init", "uninstall", "tail", "ls", "cost", "view")
 
-_STUB_SUBCOMMANDS = frozenset({"tail", "ls", "cost", "view"})
+_STUB_SUBCOMMANDS = frozenset({"ls", "cost", "view"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,6 +54,37 @@ def build_parser() -> argparse.ArgumentParser:
                 help="Print what would change; write nothing",
             )
             sp.set_defaults(func=_run_uninstall)
+        elif name == "tail":
+            sp = sub.add_parser(
+                "tail", help="ingest cc_raw_output.jsonl from SDK runs into the unified schema"
+            )
+            sp.add_argument(
+                "path",
+                help="file or directory containing cc_raw_output.jsonl",
+            )
+            sp.add_argument(
+                "--run-id",
+                dest="run_id",
+                default=None,
+                help="explicit run id (only valid for single-file ingestion)",
+            )
+            sp.add_argument(
+                "--source-name",
+                dest="source_name",
+                default=None,
+                help="human label written into state.json (default: basename of <path>)",
+            )
+            sp.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="parse and report; write nothing",
+            )
+            sp.add_argument(
+                "--force",
+                action="store_true",
+                help="re-ingest even if events already exist",
+            )
+            sp.set_defaults(func=_run_tail)
 
     # Routes `agentlog _hook <Event>` to capture.run_hook (the fail-open
     # boundary; never raises, always exits 0). Kept hidden from --help — this
@@ -65,6 +97,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub._choices_actions = [a for a in sub._choices_actions if a.dest != "_hook"]
 
     return parser
+
+
+def _run_tail(args: argparse.Namespace) -> int:
+    return tail.run_tail(
+        Path(args.path),
+        run_id=args.run_id,
+        source_name=args.source_name,
+        dry_run=args.dry_run,
+        force=args.force,
+    )
 
 
 def _run_hook(args: argparse.Namespace) -> int:

@@ -1,8 +1,4 @@
-"""agentlog CLI entry point.
-
-This is a scaffold. Subcommands (init, uninstall, tail, ls, cost, view) land in
-follow-up work driven by the ADW pipeline; see DESIGN.md "v0.1 ship scope".
-"""
+"""agentlog CLI entry point."""
 
 from __future__ import annotations
 
@@ -10,9 +6,11 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from agentlog import __version__
+from agentlog import __version__, hooks_install
 
 SUBCOMMANDS = ("init", "uninstall", "tail", "ls", "cost", "view")
+
+_STUB_SUBCOMMANDS = frozenset({"tail", "ls", "cost", "view"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,15 +20,63 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"agentlog {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+
     for name in SUBCOMMANDS:
-        sp = sub.add_parser(name, help=f"{name} (not yet implemented)")
-        sp.set_defaults(func=_not_implemented)
+        if name in _STUB_SUBCOMMANDS:
+            sp = sub.add_parser(name, help=f"{name} (not yet implemented)")
+            sp.set_defaults(func=_not_implemented)
+        elif name == "init":
+            sp = sub.add_parser("init", help="register agentlog hooks in Claude Code settings.json")
+            sp.add_argument(
+                "--project",
+                action="store_true",
+                help="Write to ./.claude/settings.json (project scope) instead of ~/.claude/settings.json",
+            )
+            sp.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="Print what would change; write nothing",
+            )
+            sp.set_defaults(func=_run_init)
+        elif name == "uninstall":
+            sp = sub.add_parser(
+                "uninstall", help="remove agentlog hooks from Claude Code settings.json"
+            )
+            sp.add_argument(
+                "--project",
+                action="store_true",
+                help="Write to ./.claude/settings.json (project scope) instead of ~/.claude/settings.json",
+            )
+            sp.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="Print what would change; write nothing",
+            )
+            sp.set_defaults(func=_run_uninstall)
+
+    # Hidden no-op stub — ship-scope item #2 will replace with real handler logic.
+    # Ensures `agentlog _hook <Event>` exits 0 cleanly after `agentlog init`.
+    hook_sp = sub.add_parser("_hook", help=argparse.SUPPRESS)
+    hook_sp.add_argument("event")
+    hook_sp.set_defaults(func=lambda args: 0)
+    # Python 3.11 doesn't honour help=SUPPRESS for subparsers in the listing;
+    # remove the pseudo-action so _hook stays functional but absent from --help.
+    sub._choices_actions = [a for a in sub._choices_actions if a.dest != "_hook"]
+
     return parser
 
 
 def _not_implemented(args: argparse.Namespace) -> int:
     print(f"agentlog {args.command}: not yet implemented", file=sys.stderr)
     return 2
+
+
+def _run_init(args: argparse.Namespace) -> int:
+    return hooks_install.run_init(project=args.project, dry_run=args.dry_run)
+
+
+def _run_uninstall(args: argparse.Namespace) -> int:
+    return hooks_install.run_uninstall(project=args.project, dry_run=args.dry_run)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

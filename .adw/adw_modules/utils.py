@@ -184,9 +184,10 @@ def check_env_vars(logger: Optional[logging.Logger] = None) -> None:
     Raises:
         SystemExit: If required environment variables are missing
     """
-    required_vars = [
-        "CLAUDE_CODE_PATH",
-    ]
+    # No env vars are strictly required: CLAUDE_CODE_PATH defaults to "claude"
+    # in agent.py (resolved via PATH). Subclasses can override this list if
+    # they need stricter checks.
+    required_vars: list[str] = []
     missing_vars = [var for var in required_vars if not os.getenv(var)]
 
     if missing_vars:

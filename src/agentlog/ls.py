@@ -155,6 +155,22 @@ def _read_json_safe(path: Path, root: Path) -> dict[str, Any] | None:
         return None
 
 
+def _count_events_jsonl(events_path: Path) -> int | None:
+    """Count non-blank lines in events.jsonl. Returns None on read failure.
+
+    Used for issue #2: state.json::event_count is only finalised when the
+    SessionEnd hook fires, so during a live session it lags. For live runs
+    (ended_at IS NULL) the displayed `events` column should reflect what's
+    actually on disk; we get that by counting lines directly. Live runs are
+    few; this scan is cheap.
+    """
+    try:
+        with events_path.open("rb") as f:
+            return sum(1 for line in f if line.strip())
+    except OSError:
+        return None
+
+
 def _index_run(
     conn: sqlite3.Connection,
     run_dir: Path,
@@ -180,6 +196,15 @@ def _index_run(
         + int(totals.get("cache_creation_tokens") or 0)
     )
 
+    # event_count: prefer the finalised value from state.json (set at
+    # SessionEnd). For live runs (no ended_at), state's count is 0/stale, so
+    # count events.jsonl lines directly. Issue #2.
+    event_count = int(state.get("event_count") or 0)
+    if state.get("ended_at") is None:
+        live_count = _count_events_jsonl(run_dir / "events.jsonl")
+        if live_count is not None:
+            event_count = live_count
+
     conn.execute(
         """
         INSERT OR REPLACE INTO runs (
@@ -197,7 +222,7 @@ def _index_run(
             state.get("ended_at"),
             state.get("cwd"),
             state.get("model"),
-            int(state.get("event_count") or 0),
+            event_count,
             total_tokens,
             state_mtime,
             cost_mtime,
@@ -232,13 +257,23 @@ def _refresh_index(conn: sqlite3.Connection, runs_root: Path, root: Path) -> Non
         cost_mtime = cost_path.stat().st_mtime if cost_path.exists() else 0.0
 
         row = conn.execute(
-            "SELECT state_mtime, cost_mtime FROM runs WHERE run_id = ?", (run_id,)
+            "SELECT state_mtime, cost_mtime, ended_at FROM runs WHERE run_id = ?",
+            (run_id,),
         ).fetchone()
 
         if row is not None:
             stored_state_mtime: float = float(row["state_mtime"])
             stored_cost_mtime: float = float(row["cost_mtime"])
-            if stored_state_mtime == state_mtime and stored_cost_mtime == cost_mtime:
+            # Skip-on-mtime-match is safe for FINALISED runs only. Live runs
+            # (ended_at NULL) keep appending to events.jsonl without state.json
+            # being touched, so the cached row's event_count would lag forever.
+            # Re-index live runs every time. Issue #2.
+            is_finalised = row["ended_at"] is not None
+            if (
+                stored_state_mtime == state_mtime
+                and stored_cost_mtime == cost_mtime
+                and is_finalised
+            ):
                 continue
 
         _index_run(conn, entry, state_path, cost_path, state_mtime, cost_mtime, root)

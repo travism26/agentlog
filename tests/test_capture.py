@@ -547,3 +547,185 @@ def test_read_json_missing_file_does_not_log(tmp_path: Path) -> None:
     result = capture._read_json(tmp_path / "nonexistent.json", tmp_path)
     assert result == {}
     assert not (tmp_path / _constants.SELF_LOG_NAME).exists()
+
+
+# ---------------------------------------------------------------------------
+# Issue #1 regression: transcript-derived usage when Stop payload lacks `usage`
+# ---------------------------------------------------------------------------
+
+
+def _write_transcript(path: Path, turns: list[dict[str, Any]]) -> None:
+    """Write a Claude Code-style JSONL transcript."""
+    path.write_text("\n".join(json.dumps(t) for t in turns) + "\n")
+
+
+_ASSISTANT_TURN_WITH_USAGE: dict[str, Any] = {
+    "type": "assistant",
+    "message": {
+        "id": "msg_123",
+        "content": [{"type": "text", "text": "hi"}],
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 1000,
+            "cache_creation_input_tokens": 25,
+        },
+    },
+}
+
+
+def test_read_transcript_usage_extracts_from_last_assistant_turn(tmp_path: Path) -> None:
+    """Happy path: a transcript ending in an assistant turn with `usage`
+    returns those numbers mapped to our internal short names."""
+    transcript = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript, [
+        {"type": "user", "content": "hi"},
+        _ASSISTANT_TURN_WITH_USAGE,
+    ])
+    result = capture._read_transcript_usage(str(transcript))
+    assert result == {
+        "input_tokens": 100,
+        "output_tokens": 50,
+        # Anthropic API names get mapped to our shorter internal names.
+        "cache_read_tokens": 1000,
+        "cache_creation_tokens": 25,
+    }
+
+
+def test_read_transcript_usage_returns_none_for_missing_file(tmp_path: Path) -> None:
+    assert capture._read_transcript_usage(str(tmp_path / "nope.jsonl")) is None
+
+
+def test_read_transcript_usage_returns_none_for_none_input() -> None:
+    assert capture._read_transcript_usage(None) is None
+    assert capture._read_transcript_usage("") is None
+
+
+def test_read_transcript_usage_returns_none_when_no_assistant_turn(tmp_path: Path) -> None:
+    """User-only transcript (no assistant has replied yet) — we have no
+    authoritative usage data, so return None and let the caller zero-out."""
+    transcript = tmp_path / "user_only.jsonl"
+    _write_transcript(transcript, [
+        {"type": "user", "content": "first message"},
+        {"type": "user", "content": "second message"},
+    ])
+    assert capture._read_transcript_usage(str(transcript)) is None
+
+
+def test_read_transcript_usage_skips_assistant_turns_without_usage(tmp_path: Path) -> None:
+    """An assistant turn with no `usage` block (malformed / pre-completion)
+    should be skipped; we want the LAST one that has real numbers."""
+    transcript = tmp_path / "mixed.jsonl"
+    older_turn_with_usage: dict[str, Any] = {
+        "type": "assistant",
+        "message": {"id": "older", "content": [], "usage": {"input_tokens": 999, "output_tokens": 1}},
+    }
+    later_turn_no_usage: dict[str, Any] = {
+        "type": "assistant",
+        "message": {"id": "later", "content": []},
+    }
+    _write_transcript(transcript, [older_turn_with_usage, later_turn_no_usage])
+    result = capture._read_transcript_usage(str(transcript))
+    assert result is not None
+    assert result["input_tokens"] == 999
+    assert result["output_tokens"] == 1
+
+
+def test_read_transcript_usage_bounded_io_on_large_file(tmp_path: Path) -> None:
+    """Regression for the hot-path latency budget (CLAUDE.md hard rule #1).
+    A 10MB transcript with the relevant assistant turn at the END must
+    return correctly AND fast — we should be reading the tail, not the head.
+    No wall-clock assertion here (CI variance) but the I/O contract is:
+    we should never read more than _TRANSCRIPT_TAIL_BYTES."""
+    transcript = tmp_path / "huge.jsonl"
+    # Fill with padding lines that look transcript-shaped but carry no usage,
+    # totaling well over 10MB. Then append the real assistant turn last.
+    pad_line = json.dumps({"type": "user", "content": "x" * 800}) + "\n"
+    target_bytes = 10 * 1024 * 1024
+    n_pad = target_bytes // len(pad_line)
+    with transcript.open("w") as f:
+        for _ in range(n_pad):
+            f.write(pad_line)
+        f.write(json.dumps(_ASSISTANT_TURN_WITH_USAGE) + "\n")
+    size = transcript.stat().st_size
+    assert size > 10 * 1024 * 1024, f"fixture not large enough: {size}"
+
+    result = capture._read_transcript_usage(str(transcript))
+    assert result is not None, "should find the assistant turn at the tail"
+    assert result["input_tokens"] == 100
+    assert result["output_tokens"] == 50
+
+
+def test_on_stop_falls_back_to_transcript_when_payload_usage_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The headline behaviour change for issue #1: a Stop payload that
+    lacks `usage` but carries `transcript_path` should produce non-zero
+    cost.json totals. Previously: silent zeros forever in hooks-mode."""
+    monkeypatch.setenv("AGENTLOG_HOME", str(tmp_path))
+    transcript = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript, [_ASSISTANT_TURN_WITH_USAGE])
+
+    payload: dict[str, Any] = {
+        "session_id": "live-test",
+        "hook_event_name": "Stop",
+        "transcript_path": str(transcript),
+        # NOTE: no `usage` key — matches real Claude Code Stop payload shape
+    }
+    rc = capture.dispatch("Stop", payload, now=_FIXED_NOW)
+    assert rc == 0
+
+    cost = json.loads((tmp_path / "runs" / "live-test" / "cost.json").read_text())
+    assert cost["totals"]["input_tokens"] == 100
+    assert cost["totals"]["output_tokens"] == 50
+    assert cost["totals"]["cache_read_tokens"] == 1000
+    assert cost["totals"]["cache_creation_tokens"] == 25
+
+
+def test_on_stop_payload_usage_wins_over_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If a future Stop payload DOES carry `usage`, it should take precedence
+    over the transcript file. Protects against double-counting if the schema
+    changes upstream."""
+    monkeypatch.setenv("AGENTLOG_HOME", str(tmp_path))
+    transcript = tmp_path / "transcript.jsonl"
+    _write_transcript(transcript, [_ASSISTANT_TURN_WITH_USAGE])  # 100/50/1000/25
+
+    payload: dict[str, Any] = {
+        "session_id": "explicit-usage",
+        "hook_event_name": "Stop",
+        "transcript_path": str(transcript),
+        "usage": {
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+        },
+    }
+    capture.dispatch("Stop", payload, now=_FIXED_NOW)
+    cost = json.loads((tmp_path / "runs" / "explicit-usage" / "cost.json").read_text())
+    assert cost["totals"]["input_tokens"] == 7
+    assert cost["totals"]["output_tokens"] == 3
+
+
+def test_on_stop_zero_usage_when_no_transcript_and_no_payload_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Graceful degradation: missing transcript AND missing payload.usage
+    yields the old zero-totals behaviour, NOT a crash."""
+    monkeypatch.setenv("AGENTLOG_HOME", str(tmp_path))
+    payload: dict[str, Any] = {
+        "session_id": "no-data",
+        "hook_event_name": "Stop",
+        # no transcript_path, no usage
+    }
+    rc = capture.dispatch("Stop", payload, now=_FIXED_NOW)
+    assert rc == 0
+    cost = json.loads((tmp_path / "runs" / "no-data" / "cost.json").read_text())
+    assert cost["totals"] == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+    }

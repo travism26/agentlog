@@ -43,13 +43,17 @@ The development of agentlog itself was captured by agentlog — running `agentlo
 
 ## Install
 
+v0.1 isn't on PyPI yet. Install directly from the GitHub repo:
+
 ```bash
-pip install 'agentlog[tui]'
+pip install 'agentlog[tui] @ git+https://github.com/travism26/agentlog'
 # or
-uv tool install 'agentlog[tui]'
+uv tool install --with rich 'git+https://github.com/travism26/agentlog'
 ```
 
-The `[tui]` extra pulls in `rich` for `agentlog view`. The base install (`pip install agentlog`) is stdlib-only — all subcommands except `view` work without `rich`.
+The `[tui]` extra pulls in `rich` for `agentlog view`. The base install (without `--with rich` / without the `[tui]` extra) is stdlib-only — all subcommands except `view` work without `rich`.
+
+A PyPI release is on the v0.2 roadmap; once published, the install will simplify to `pip install 'agentlog[tui]'`.
 
 Python 3.11+, MIT licensed, no SaaS, no required network calls.
 
@@ -109,7 +113,7 @@ The schema is identical for both sources. A hooks-mode session and a SDK-mode se
 - **Cost visibility, per run.** `agentlog cost <id>` multiplies recorded token totals by a built-in Anthropic pricing table (overridable via `--pricing` or `$AGENTLOG_PRICING`). `agentlog cost --all` rolls up across every captured run, sorted by spend.
 - **Replay, per run.** `agentlog view <id>` renders a three-panel TUI: run metadata, event-by-event timeline (color-coded by kind, per-tool params extracted), cost footer. Pipe to `less -R` for long sessions.
 - **Local-first.** Everything lives under `~/.agentlog/`. No SaaS. No required network calls. OTEL export is on the roadmap for v1.0+, opt-in.
-- **Stdlib-only core.** `pyproject.toml dependencies = []`. `rich` is an optional `[tui]` extra used only by `view`. Distribution: `pip install agentlog` or `uv tool install agentlog`.
+- **Stdlib-only core.** `pyproject.toml dependencies = []`. `rich` is an optional `[tui]` extra used only by `view`. Distribution: install from GitHub today; PyPI release tracked for v0.2 (see Install section above).
 
 ## What this is NOT
 

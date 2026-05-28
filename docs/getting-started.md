@@ -6,17 +6,21 @@ If you've read the README and want a 5-minute hands-on tour, this is the page. I
 
 ## 1. Install
 
+v0.1 isn't on PyPI yet. Install from the GitHub repo:
+
 ```bash
-pip install 'agentlog[tui]'
+pip install 'agentlog[tui] @ git+https://github.com/travism26/agentlog'
 ```
 
 or via uv:
 
 ```bash
-uv tool install 'agentlog[tui]'
+uv tool install --with rich 'git+https://github.com/travism26/agentlog'
 ```
 
 The `[tui]` extra installs `rich`, which is required only for `agentlog view` (the three-panel TUI renderer). All other subcommands — `init`, `uninstall`, `tail`, `ls`, `cost` — are stdlib-only and work without it. `agentlog view --json` also works without `rich`.
+
+A PyPI release is planned for v0.2; once published, the install will simplify to `pip install 'agentlog[tui]'`.
 
 Verify the install:
 
@@ -169,7 +173,7 @@ or set `$AGENTLOG_PRICING` to the file path. The file format is `{"model-id": {"
 agentlog view sdk-abc123
 ```
 
-Requires `rich` (`pip install 'agentlog[tui]'`). Renders a three-panel layout: **header** (run metadata), **timeline** (chronological event list with ASCII rail decorations, color-coded by event kind), and **cost footer** (token counts and dollar cost). See the README for a hero screenshot of the TUI output.
+Requires `rich` (installed via the `[tui]` extra — see [Install](#1-install) above). Renders a three-panel layout: **header** (run metadata), **timeline** (chronological event list with ASCII rail decorations, color-coded by event kind), and **cost footer** (token counts and dollar cost). See the README for a hero screenshot of the TUI output.
 
 Useful flags:
 

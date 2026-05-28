@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -64,20 +65,56 @@ def _log_self(root: Path, message: str) -> None:
 # Built-in pricing table
 # ---------------------------------------------------------------------------
 
-# $ per million tokens. Source: anthropic.com/pricing as of 2026-05-27.
+# $ per million tokens. Source: anthropic.com/pricing as of 2026-05-28.
 # Override with --pricing <path>, $AGENTLOG_PRICING, or $AGENTLOG_HOME/pricing.json.
+#
+# IMPORTANT — billing mode assumption: these rates are the public API
+# pay-per-token prices. If you're using Claude Code via a Pro/Max/Team
+# subscription, you pay a flat monthly fee and these dollar amounts do NOT
+# reflect what you owe — only token consumption against your quota. See
+# GitHub issue #3 for explicit billing-mode handling on the v0.2 roadmap.
+#
+# Cache pricing formulas Anthropic publishes:
+#   cache_read   = input × 0.1   (90% discount on cache hits)
+#   cache_create = input × 1.25  (5-minute cache write surcharge)
+# A 1-hour cache write would be input × 2.0 — agentlog can't distinguish
+# write durations from the hook payload, so we use the 5-min rate (the more
+# common case) and accept ~ 60% understatement for 1-hour caches.
+#
+# The table is keyed by the base model id without context-window suffix.
+# Claude Code reports model ids like "claude-opus-4-8[1m]" where `[1m]`
+# indicates the 1M-context variant. `_pricing_lookup_key` strips that suffix
+# before lookup; both standard and extended-context variants currently share
+# pricing here. If Anthropic differentiates pricing per context variant in
+# the future, add explicit entries for the suffixed ids (e.g.
+# "claude-opus-4-8[1m]") — exact matches win over the stripped lookup.
 BUILTIN_PRICING_PER_MILLION: dict[str, dict[str, float]] = {
+    # Opus family — premium tier. Anthropic dropped Opus pricing 3x from
+    # the early-2026 rates ($15/$75 → $5/$25) when 4.7/4.8 launched.
+    "claude-opus-4-8": {
+        "input": 5.00,
+        "output": 25.00,
+        "cache_read": 0.50,
+        "cache_creation": 6.25,
+    },
     "claude-opus-4-7": {
-        "input": 15.00,
-        "output": 75.00,
-        "cache_read": 1.50,
-        "cache_creation": 18.75,
+        "input": 5.00,
+        "output": 25.00,
+        "cache_read": 0.50,
+        "cache_creation": 6.25,
     },
     "claude-opus-4-6": {
         "input": 15.00,
         "output": 75.00,
         "cache_read": 1.50,
         "cache_creation": 18.75,
+    },
+    # Sonnet family — balanced tier
+    "claude-sonnet-4-7": {
+        "input": 3.00,
+        "output": 15.00,
+        "cache_read": 0.30,
+        "cache_creation": 3.75,
     },
     "claude-sonnet-4-6": {
         "input": 3.00,
@@ -91,17 +128,46 @@ BUILTIN_PRICING_PER_MILLION: dict[str, dict[str, float]] = {
         "cache_read": 0.30,
         "cache_creation": 3.75,
     },
+    # Haiku family — economy tier. Slight bump (0.80 → 1.00) for 4.5/4.6.
+    "claude-haiku-4-6": {
+        "input": 1.00,
+        "output": 5.00,
+        "cache_read": 0.10,
+        "cache_creation": 1.25,
+    },
     "claude-haiku-4-5": {
-        "input": 0.80,
-        "output": 4.00,
-        "cache_read": 0.08,
-        "cache_creation": 1.00,
+        "input": 1.00,
+        "output": 5.00,
+        "cache_read": 0.10,
+        "cache_creation": 1.25,
     },
 }
 
+
+# Match a trailing `[<digits><letters>]` context-window suffix, e.g. `[1m]`,
+# `[200k]`. Greedy on the closing bracket so we only strip a real suffix.
+_CONTEXT_SUFFIX_RE = re.compile(r"\[\d+[a-zA-Z]+\]$")
+
+
+def _pricing_lookup_key(model: str | None) -> str | None:
+    """Resolve a Claude Code model id to its pricing-table key.
+
+    Claude Code reports model ids with a context-window suffix like
+    `claude-opus-4-8[1m]`. Pricing is keyed by the base id (`claude-opus-4-8`).
+    An exact match always wins so users can override per-suffix if Anthropic
+    differentiates pricing per context variant in future.
+    """
+    if not model:
+        return None
+    if model in BUILTIN_PRICING_PER_MILLION:
+        return model
+    return _CONTEXT_SUFFIX_RE.sub("", model) or None
+
 _PRICING_STALENESS_FOOTER = (
-    "pricing snapshot: built-in (2026-05-27). "
-    "Override with --pricing <file> or $AGENTLOG_PRICING."
+    "pricing snapshot: built-in API rates (2026-05-28). "
+    "Note: if you use Claude Code via a Pro/Max/Team subscription, you pay a "
+    "flat monthly fee — these dollar amounts reflect equivalent API cost, not "
+    "what you actually owe. Override with --pricing or $AGENTLOG_PRICING."
 )
 
 _TOKEN_KINDS = ("input", "output", "cache_read", "cache_creation")
@@ -309,7 +375,17 @@ def _compute_run_cost(
         tokens[kind] = int(raw_totals.get(field) or 0)
     tokens["total"] = sum(tokens.values())
 
-    if not model or model not in pricing:
+    # Resolve the model id against the pricing table. An exact match wins
+    # (lets users override per context-window via --pricing); otherwise we
+    # strip a trailing `[Nm]` suffix and try the base id. See
+    # `_pricing_lookup_key`.
+    pricing_key = _pricing_lookup_key(model)
+    if pricing_key is not None and pricing_key not in pricing:
+        # User-provided pricing file may not have the stripped key even though
+        # the builtin does. Try the builtin as a final fallback for the
+        # stripped form only (not the original suffixed form).
+        pricing_key = pricing_key if pricing_key in pricing else None
+    if not model or pricing_key is None:
         return {
             "run_id": run_id,
             "session_id": session_id,
@@ -326,7 +402,7 @@ def _compute_run_cost(
             "cost_unknown_reason": "model not in pricing table",
         }
 
-    model_rates = pricing[model]
+    model_rates = pricing[pricing_key]
     rates: dict[str, float] = {k: model_rates.get(k, 0.0) for k in _TOKEN_KINDS}
 
     costs: dict[str, float] = {}

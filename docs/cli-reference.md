@@ -325,7 +325,7 @@ Displays a captured run in three panels:
 - **Timeline** — chronological event list with ASCII rail decorations, color-coded by event kind
 - **Cost footer** — token counts and dollar cost (same computation as `agentlog cost`)
 
-Requires the `rich` library for TUI rendering (`pip install 'agentlog[tui]'`). The `--json` flag emits a combined JSON object and works without `rich` installed.
+Requires the `rich` library for TUI rendering (installed via the `[tui]` extra — see [getting-started.md § Install](getting-started.md#1-install)). The `--json` flag emits a combined JSON object and works without `rich` installed.
 
 `--limit` caps the number of timeline events shown. Use `--limit 0` to show all events. The header and cost footer are always shown unless `--events-only` is passed.
 

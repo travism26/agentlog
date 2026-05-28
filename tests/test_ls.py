@@ -783,3 +783,123 @@ def test_format_plain_tokens_zero_and_run_id_present() -> None:
     assert "a-very-long-run-id-that-should-not-be-truncated" in output
     assert "0" in output  # zero tokens shown, not dash
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Issue #2 regression: live sessions show real event_count
+# ---------------------------------------------------------------------------
+
+
+def _seed_live_run(runs_root: Path, run_id: str, event_count_on_disk: int) -> Path:
+    """Seed a run with state.json::ended_at=null and N lines in events.jsonl.
+    Simulates a session that's been active but hasn't fired SessionEnd yet."""
+    run_dir = runs_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "schema_version": 1,
+        "session_id": run_id,
+        "source": "hooks",
+        "started_at": "2026-05-28T10:00:00+00:00",
+        "ended_at": None,
+        "cwd": "/tmp",
+        "model": "claude-opus-4-7",
+        # event_count is the LIES value — 0 in real Claude Code captures until
+        # SessionEnd fires. The test asserts ls overrides this with the
+        # actual on-disk count.
+        "event_count": 0,
+    }))
+    (run_dir / "events.jsonl").write_text(
+        "".join(
+            json.dumps({"event": "x", "i": i}) + "\n" for i in range(event_count_on_disk)
+        )
+    )
+    return run_dir
+
+
+def test_ls_overrides_event_count_from_events_jsonl_for_live_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The headline behaviour change for issue #2: a live run (ended_at NULL)
+    whose state.json says `event_count: 0` but whose events.jsonl has 5 lines
+    must be displayed as 5, not 0."""
+    monkeypatch.setenv("AGENTLOG_HOME", str(tmp_path))
+    runs_root = tmp_path / "runs"
+    _seed_live_run(runs_root, "live-session-001", event_count_on_disk=5)
+
+    rc = ls.run_ls(
+        source="all", since=None, sort_key="started", reverse=False,
+        limit=10, as_json=False, reindex=False,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Find the live-session row; the events column must read 5, not 0.
+    matching = [line for line in out.splitlines() if "live-session-001" in line]
+    assert matching, f"live-session row missing from output:\n{out}"
+    assert " 5 " in matching[0] or matching[0].rstrip().endswith(" 5"), (
+        f"expected event count 5 in row, got: {matching[0]!r}"
+    )
+
+
+def test_ls_uses_state_event_count_for_finalised_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Inverse check: for a FINALISED run (ended_at present), state.json's
+    event_count is authoritative — don't second-guess it by re-counting
+    events.jsonl, since SessionEnd already did the math."""
+    monkeypatch.setenv("AGENTLOG_HOME", str(tmp_path))
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "finalised-session-002"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "finalised-session-002", "source": "hooks",
+        "started_at": "2026-05-28T10:00:00+00:00",
+        "ended_at": "2026-05-28T10:10:00+00:00",  # finalised
+        "cwd": "/tmp", "model": "claude-opus-4-7",
+        "event_count": 42,  # the authoritative number
+    }))
+    # Seed events.jsonl with a DIFFERENT count — state.json must win.
+    (run_dir / "events.jsonl").write_text(
+        "".join(json.dumps({"i": i}) + "\n" for i in range(7))
+    )
+    rc = ls.run_ls(
+        source="all", since=None, sort_key="started", reverse=False,
+        limit=10, as_json=False, reindex=False,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    matching = [line for line in out.splitlines() if "finalised-session-002" in line]
+    assert matching
+    assert " 42 " in matching[0] or matching[0].rstrip().endswith(" 42")
+
+
+def test_ls_re_runs_index_for_live_session_when_events_grow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Skip-on-mtime-match must NOT apply to live runs. After ls indexes a
+    live run, appending to events.jsonl (without touching state.json) must
+    cause the NEXT ls invocation to refresh the count, not return the cached
+    stale value. Regression for the mtime-skip bug in issue #2."""
+    monkeypatch.setenv("AGENTLOG_HOME", str(tmp_path))
+    runs_root = tmp_path / "runs"
+    run_dir = _seed_live_run(runs_root, "growing-session-003", event_count_on_disk=2)
+
+    # First ls — should show 2.
+    ls.run_ls(source="all", since=None, sort_key="started", reverse=False,
+              limit=10, as_json=False, reindex=False)
+    capsys.readouterr()  # discard
+
+    # Append 3 more events; do NOT touch state.json (simulating live capture).
+    with (run_dir / "events.jsonl").open("a") as f:
+        for i in range(3):
+            f.write(json.dumps({"event": "x", "i": 100 + i}) + "\n")
+
+    # Second ls — must reflect the new total (5), not the cached 2.
+    rc = ls.run_ls(source="all", since=None, sort_key="started", reverse=False,
+                   limit=10, as_json=False, reindex=False)
+    assert rc == 0
+    out = capsys.readouterr().out
+    matching = [line for line in out.splitlines() if "growing-session-003" in line]
+    assert matching
+    assert " 5 " in matching[0] or matching[0].rstrip().endswith(" 5"), (
+        f"expected refreshed count 5, got: {matching[0]!r}"
+    )

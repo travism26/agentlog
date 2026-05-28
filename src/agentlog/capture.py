@@ -122,6 +122,80 @@ def _read_json(path: Path, root: Path) -> dict[str, Any]:
     return {}
 
 
+# Bounded-I/O ceiling for transcript reads. The Stop hook fires in the hot
+# path (CLAUDE.md hard rule #1: <10ms steady-state). Reading the last 64KB of
+# a transcript is enough to capture the most recent assistant turn in every
+# realistic case while keeping the read cost flat regardless of session length.
+_TRANSCRIPT_TAIL_BYTES = 65536
+
+
+def _read_transcript_usage(transcript_path_str: Any) -> dict[str, int] | None:
+    """Extract token usage from the most recent assistant turn in a Claude Code
+    transcript file. Returns None on any failure; caller falls back to zero.
+
+    Background: the Stop hook payload does not carry a `usage` block (verified
+    against Claude Code 2.1.152 on 2026-05-28). The authoritative source for
+    post-turn token totals is the transcript file referenced by
+    `payload["transcript_path"]`. See GitHub issue #1.
+
+    Bounded I/O: reads at most `_TRANSCRIPT_TAIL_BYTES` from the file tail,
+    regardless of total size. A multi-MB transcript costs the same as a 1KB
+    one to inspect.
+    """
+    if not isinstance(transcript_path_str, str) or not transcript_path_str:
+        return None
+    path = Path(transcript_path_str)
+    if not path.is_file():
+        return None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size == 0:
+        return None
+    tail = min(size, _TRANSCRIPT_TAIL_BYTES)
+    try:
+        with path.open("rb") as f:
+            f.seek(size - tail)
+            raw = f.read()
+    except OSError:
+        return None
+    # If we seeked into the middle of a line, drop the partial leading line.
+    if size > _TRANSCRIPT_TAIL_BYTES:
+        nl = raw.find(b"\n")
+        if nl < 0:
+            return None
+        raw = raw[nl + 1 :]
+    text = raw.decode("utf-8", errors="replace")
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            record = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or record.get("type") != "assistant":
+            continue
+        msg = record.get("message")
+        if not isinstance(msg, dict):
+            continue
+        usage = msg.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        # Anthropic API uses cache_*_input_tokens; our internal schema drops
+        # the `_input_`. Map at the boundary so cost.json stays consistent.
+        return {
+            "input_tokens": int(usage.get("input_tokens") or 0),
+            "output_tokens": int(usage.get("output_tokens") or 0),
+            "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+            "cache_creation_tokens": int(
+                usage.get("cache_creation_input_tokens") or 0
+            ),
+        }
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Per-event recorders
 # ---------------------------------------------------------------------------
@@ -243,7 +317,15 @@ def _on_stop(
     session_id: str,
     root: Path,
 ) -> None:
-    usage = payload.get("usage") or {}
+    # Source precedence: explicit payload.usage (synthetic / future schema)
+    # wins; otherwise read the transcript Claude Code's Stop hook references.
+    # The hook payload does NOT carry usage in current Claude Code versions
+    # (issue #1) — without the transcript fallback, hooks-mode cost.json
+    # stays all-zero forever.
+    raw_usage = payload.get("usage")
+    if not raw_usage:
+        raw_usage = _read_transcript_usage(payload.get("transcript_path"))
+    usage = raw_usage or {}
     usage_record: dict[str, int] = {
         "input_tokens": int(usage.get("input_tokens") or 0),
         "output_tokens": int(usage.get("output_tokens") or 0),

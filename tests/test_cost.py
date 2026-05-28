@@ -1330,3 +1330,80 @@ def test_cost_all_equal_cost_breaks_tie_with_NEWER_first(
     older_pos = out.find("older")
     assert newer_pos != -1 and older_pos != -1
     assert newer_pos < older_pos, "tiebreaker put older run first; spec requires newer first"
+
+
+# ---------------------------------------------------------------------------
+# Issue #3 / hotfix: context-window suffix stripping and 4-8 pricing entries
+# ---------------------------------------------------------------------------
+
+
+def test_pricing_lookup_strips_context_window_suffix() -> None:
+    """Claude Code reports model ids like `claude-opus-4-8[1m]` (where [1m]
+    is the 1M-context variant). The lookup should resolve to the base id so
+    we can price these runs without per-suffix entries."""
+    assert cost._pricing_lookup_key("claude-opus-4-8[1m]") == "claude-opus-4-8"
+    assert cost._pricing_lookup_key("claude-sonnet-4-6[200k]") == "claude-sonnet-4-6"
+
+
+def test_pricing_lookup_exact_match_wins_over_strip() -> None:
+    """If a suffixed id is explicitly in the table (e.g. user override
+    differentiates 1M-context pricing), the exact entry must win — we should
+    NOT silently strip and fall back to the base."""
+    # Add a temporary explicit entry, then remove it.
+    cost.BUILTIN_PRICING_PER_MILLION["claude-opus-4-8[1m]"] = {
+        "input": 99.0, "output": 99.0, "cache_read": 9.9, "cache_creation": 99.0,
+    }
+    try:
+        assert cost._pricing_lookup_key("claude-opus-4-8[1m]") == "claude-opus-4-8[1m]"
+    finally:
+        del cost.BUILTIN_PRICING_PER_MILLION["claude-opus-4-8[1m]"]
+
+
+def test_pricing_lookup_handles_no_suffix_no_match() -> None:
+    """A completely unknown model returns the unchanged string (caller checks
+    against the table)."""
+    assert cost._pricing_lookup_key("claude-future-9-9") == "claude-future-9-9"
+    assert cost._pricing_lookup_key(None) is None
+    assert cost._pricing_lookup_key("") is None
+
+
+def test_claude_opus_4_8_with_1m_suffix_gets_real_dollars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """End-to-end: a run captured with model `claude-opus-4-8[1m]` should now
+    compute real dollar amounts via the suffix-strip path. Regression for
+    the live finding from the v0.1 dogfood test."""
+    monkeypatch.setenv("AGENTLOG_HOME", str(tmp_path))
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "live-opus-4-8"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "live-opus-4-8", "source": "hooks",
+        "started_at": "2026-05-28T20:37:34+00:00",
+        "ended_at": "2026-05-28T20:45:06+00:00",
+        "cwd": "/tmp", "model": "claude-opus-4-8[1m]",
+        "event_count": 7,
+    }))
+    (run_dir / "cost.json").write_text(json.dumps({
+        "schema_version": 1, "session_id": "live-opus-4-8",
+        "totals": {
+            "input_tokens": 3915,
+            "output_tokens": 149,
+            "cache_read_tokens": 37173,
+            "cache_creation_tokens": 8809,
+        },
+    }))
+
+    rc = cost.run_cost(
+        run_id="live-opus-4-8", all_=False, source="all", since=None,
+        pricing_path=None, as_json=True, no_cache_cost=False,
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    # Should NOT be missing — strip worked.
+    assert payload["pricing_source"] != "missing"
+    assert payload["cost_usd"] is not None
+    assert payload["cost_usd"] > 0
+    # At Opus 4.8 rates ($5 in / $25 out / $0.50 cache_r / $6.25 cache_c):
+    # 3915 × 5 + 149 × 25 + 37173 × 0.50 + 8809 × 6.25 = $0.097 ish
+    assert 0.05 < payload["cost_usd"] < 0.15
